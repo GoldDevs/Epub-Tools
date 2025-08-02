@@ -168,3 +168,43 @@ class ReplaceEngine:
     def get_replacement_history(self, max_items: int = 10) -> List[Tuple]:
         """Get recent replacement history"""
         return list(self.replacement_history[-max_items:])
+    
+    def replace_by_results(self, results_to_replace: List[SearchResult], new_text: str) -> ReplacementStats:
+        """
+        Safely replaces text for a given list of SearchResult objects.
+        It processes results grouped by file and in reverse line/column order to avoid index corruption.
+        """
+        stats = ReplacementStats()
+        # Group results by file
+        grouped_results: Dict[str, List[SearchResult]] = {}
+        for res in results_to_replace:
+            if res.file_path not in grouped_results:
+                grouped_results[res.file_path] = []
+            grouped_results[res.file_path].append(res)
+        
+        for file_path, results in grouped_results.items():
+            # IMPORTANT: Sort results in reverse order to prevent index invalidation
+            results.sort(key=lambda r: (r.line_number, r.start_pos), reverse=True)
+            
+            content = self.content_manager.get_content(file_path)
+            if not content: continue
+    
+            lines = content.split('\n')
+            file_replacements = 0
+            
+            for res in results:
+                line_idx = res.line_number - 1
+                if 0 <= line_idx < len(lines):
+                    line = lines[line_idx]
+                    # Double-check that the original text is still there before replacing
+                    if line[res.start_pos:res.end_pos] == res.match_text:
+                        lines[line_idx] = line[:res.start_pos] + new_text + line[res.end_pos:]
+                        file_replacements += 1
+    
+            if file_replacements > 0:
+                new_content = '\n'.join(lines)
+                if self.content_manager.update_content(file_path, new_content):
+                    stats.total_replacements += file_replacements
+                    stats.files_modified += 1
+    
+        return stats

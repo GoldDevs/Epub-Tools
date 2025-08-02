@@ -1,319 +1,180 @@
+# epub_editor_pro/navigation_system/screen_manager.py
+
 import curses
 import time
-import pickle
 from pathlib import Path
 from typing import Dict, List, Callable, Optional, Any, Type
-from .input_handler import InputHandler
-from ..ui.layout_manager import LayoutManager
-from ..ui.material_components import MaterialTheme
-from ..screens import (DashboardScreen, FileManagerScreen, SearchScreen, 
-                      SearchResultsScreen, ReplaceScreen, BatchOperationsScreen,
-                      SettingsScreen, HelpScreen)
 
-class ScreenState:
-    def __init__(self, screen_name: str, data: Any = None):
-        self.screen_name = screen_name
-        self.data = data
-        self.timestamp = time.time()
+# Import components and base screen for internal use
+from ..ui.material_components import MaterialSnackbar, MaterialCard, MaterialButton
+from ..screens.base_screen import BaseScreen
+
+# Forward declarations for type hinting to avoid circular imports
+if False:
+    from .input_handler import InputHandler
+    from ..ui.layout_manager import LayoutManager
+    from ..ui.material_components import MaterialTheme
 
 class ScreenManager:
-    def __init__(self, stdscr, theme: MaterialTheme, input_handler: InputHandler):
+    def __init__(self, stdscr, theme: 'MaterialTheme', input_handler: 'InputHandler', core_modules: Any):
         self.stdscr = stdscr
         self.theme = theme
         self.input_handler = input_handler
-        self.layout = LayoutManager(stdscr)
-        self.screen_stack: List[ScreenState] = []
-        self.screen_cache: Dict[str, Any] = {}
-        self.current_screen = None
-        self.screen_classes: Dict[str, Type] = {
-            "dashboard": DashboardScreen,
-            "file_manager": FileManagerScreen,
-            "search": SearchScreen,
-            "search_results": SearchResultsScreen,
-            "replace": ReplaceScreen,
-            "batch_ops": BatchOperationsScreen,
-            "settings": SettingsScreen,
-            "help": HelpScreen
-        }
-        self.transition_in_progress = False
-        self.state_dir = Path("state_cache")
-        self.state_dir.mkdir(exist_ok=True)
-        self.init_navigation_shortcuts()
+        self.core_modules = core_modules
+        self.layout = self.core_modules.layout
         
-    def init_navigation_shortcuts(self):
-        """Register common navigation shortcuts"""
-        self.input_handler.register_key(curses.KEY_BACKSPACE, self.go_back, "global")
-        self.input_handler.register_key(27, self.go_back)  # ESC key
-        self.input_handler.register_key(ord('b'), self.go_back)
+        self.screen_cache: Dict[str, 'BaseScreen'] = {} # Cache to store screen instances
+        self.screen_stack: List['BaseScreen'] = []
+        self.current_screen: Optional['BaseScreen'] = None
+        self.dialog_stack: List['BaseScreen'] = []
         
-        # Swipe gestures for navigation
-        self.input_handler.enable_swipe_navigation(
-            left_action=self.go_back,
-            right_action=None,  # Not used for back navigation
-            up_action=self.scroll_up,
-            down_action=self.scroll_down
-        )
-        
-    def navigate_to(self, screen_name: str, data: Any = None, save_current: bool = True):
-        """Navigate to a new screen"""
-        if self.transition_in_progress:
-            return
-            
-        self.transition_in_progress = True
-        
-        # Save current screen state
-        if save_current and self.current_screen:
-            self.cache_screen_state()
-            
-        # Push current state to stack
+        self.screen_classes: Dict[str, Type['BaseScreen']] = {}
+        self.snackbar: Optional['MaterialSnackbar'] = None
+        self.running = True
+
+    def stop(self):
+        """Signals the main application loop to terminate."""
+        self.running = False
+
+    def navigate_to(self, screen_name: str, data: Any = None):
+        """Navigate to a screen. Uses a cached instance or creates a new one."""
         if self.current_screen:
-            self.screen_stack.append(ScreenState(
-                self.current_screen.name,
-                self.current_screen.get_state()
-            ))
+            if self.current_screen.name == screen_name: return # Avoid navigating to self
+            self.current_screen.on_pause()
+            self.screen_stack.append(self.current_screen)
             
-        # Clear input queue during transition
-        self.input_handler.input_queue.clear()
-        
-        # Load new screen
-        self.load_screen(screen_name, data)
-        self.transition_in_progress = False
-        
-    def load_screen(self, screen_name: str, data: Any = None):
-        """Load a screen by name"""
-        # Check cache first
+        # Check cache for an existing screen instance
         if screen_name in self.screen_cache:
             self.current_screen = self.screen_cache[screen_name]
             self.current_screen.on_resume(data)
-            return
-            
-        # Create new screen instance
-        if screen_name in self.screen_classes:
-            screen_class = self.screen_classes[screen_name]
-            self.current_screen = screen_class(
-                self.stdscr,
-                self.theme,
-                self.layout,
-                self.input_handler,
-                self
-            )
-            self.current_screen.name = screen_name
-            
-            # Try to load saved state
-            state = self.load_screen_state(screen_name)
-            if state:
-                self.current_screen.set_state(state)
-                
-            self.current_screen.on_create(data)
-            self.screen_cache[screen_name] = self.current_screen
         else:
-            # Fallback to dashboard
-            self.navigate_to("dashboard")
-            
-        # Update input context
-        self.input_handler.set_context(screen_name)
+            self._load_screen(screen_name, data)
         
     def go_back(self):
-        """Navigate back to previous screen"""
-        if len(self.screen_stack) == 0 or self.transition_in_progress:
+        """Navigate back to the previous screen on the stack."""
+        if not self.screen_stack:
+            self.show_snackbar("No previous screen.", style="warning")
             return
+
+        if self.current_screen:
+            self.current_screen.on_pause()
             
-        self.transition_in_progress = True
-        
-        # Cache current screen state
-        self.cache_screen_state()
-        
-        # Get previous screen state
-        prev_state = self.screen_stack.pop()
-        
-        # Load previous screen
-        self.load_screen(prev_state.screen_name, prev_state.data)
-        self.transition_in_progress = False
-        
-    def go_home(self):
-        """Navigate to dashboard clearing history"""
-        self.screen_stack.clear()
-        self.navigate_to("dashboard", save_current=False)
-        
-    def scroll_up(self):
-        """Scroll up in current screen"""
-        if self.current_screen and hasattr(self.current_screen, 'scroll_up'):
-            self.current_screen.scroll_up()
-            
-    def scroll_down(self):
-        """Scroll down in current screen"""
-        if self.current_screen and hasattr(self.current_screen, 'scroll_down'):
-            self.current_screen.scroll_down()
-            
-    def cache_screen_state(self):
-        """Save current screen state to cache"""
-        if not self.current_screen:
-            return
-            
-        # Get current state
-        state = self.current_screen.get_state()
-        if state:
-            self.screen_cache[self.current_screen.name] = self.current_screen
-            
-        # Persist to disk
-        self.save_screen_state(self.current_screen.name, state)
-        
-    def save_screen_state(self, screen_name: str, state: Any):
-        """Save screen state to disk"""
-        state_path = self.state_dir / f"{screen_name}.pkl"
-        try:
-            with open(state_path, 'wb') as f:
-                pickle.dump(state, f)
-        except OSError:
-            pass
-            
-    def load_screen_state(self, screen_name: str) -> Optional[Any]:
-        """Load screen state from disk"""
-        state_path = self.state_dir / f"{screen_name}.pkl"
-        if state_path.exists():
-            try:
-                with open(state_path, 'rb') as f:
-                    return pickle.load(f)
-            except (OSError, pickle.UnpicklingError):
-                return None
-        return None
-        
-    def clear_cache(self, screen_name: str = None):
-        """Clear screen cache"""
-        if screen_name:
-            if screen_name in self.screen_cache:
-                # Call cleanup method if exists
-                if hasattr(self.screen_cache[screen_name], 'on_destroy'):
-                    self.screen_cache[screen_name].on_destroy()
-                del self.screen_cache[screen_name]
-                
-            # Delete state file
-            state_path = self.state_dir / f"{screen_name}.pkl"
-            if state_path.exists():
-                state_path.unlink()
+        self.current_screen = self.screen_stack.pop()
+        self.current_screen.on_resume()
+
+    def _load_screen(self, screen_name: str, data: Any):
+        """Instantiates, caches, and sets up a new screen."""
+        if screen_name in self.screen_classes:
+            screen_class = self.screen_classes[screen_name]
+            instance = screen_class(
+                self.stdscr, self.theme, self.layout, self.input_handler, self, self.core_modules
+            )
+            self.current_screen = instance
+            self.screen_cache[screen_name] = instance # Add to cache
+            instance.on_create(data)
         else:
-            # Clear all cached screens
-            for name, screen in list(self.screen_cache.items()):
-                if hasattr(screen, 'on_destroy'):
-                    screen.on_destroy()
-                del self.screen_cache[name]
-                
-            # Clear all state files
-            for state_file in self.state_dir.glob("*.pkl"):
-                state_file.unlink()
-                
-    def draw(self):
-        """Draw current screen"""
-        if not self.current_screen:
-            return
-            
-        # Update layout if screen size changed
-        if self.layout.needs_redraw():
-            self.layout.update_layout()
-            self.current_screen.on_resize()
-            
-        # Draw screen content
-        self.current_screen.draw()
+            self.show_snackbar(f"Error: Screen '{screen_name}' not found!", style="error")
+
+    def get_active_screen(self) -> Optional['BaseScreen']:
+        """Returns the active dialog or the current screen."""
+        return self.dialog_stack[-1] if self.dialog_stack else self.current_screen
+
+    def handle_input(self):
+        """CORRECTED: Delegates to the InputHandler, which then calls the active screen."""
+        self.input_handler.process_input()
         
     def update(self):
-        """Update current screen logic"""
-        if self.current_screen and hasattr(self.current_screen, 'update'):
-            self.current_screen.update()
-            
-    def handle_input(self):
-        """Handle input for current screen"""
-        if self.current_screen:
-            # Process input through handler
-            self.input_handler.process_input()
-            
-            # Pass to screen-specific handler
-            if hasattr(self.current_screen, 'handle_input'):
-                self.current_screen.handle_input()
-                
-    def get_current_screen_name(self) -> str:
-        """Get name of current screen"""
-        return self.current_screen.name if self.current_screen else ""
-        
-    def get_navigation_history(self) -> List[str]:
-        """Get navigation history as screen names"""
-        return [state.screen_name for state in self.screen_stack]
-        
-    def show_dialog(self, dialog_component):
-        """Show a modal dialog"""
-        # Save current screen reference
-        self.screen_stack.append(ScreenState(
-            self.current_screen.name,
-            self.current_screen.get_state()
-        ))
-        
-        # Create dialog screen
-        self.current_screen = dialog_component
-        self.layout.show_modal()
-        
+        """Updates the logic of the active screen or dialog."""
+        active_screen = self.get_active_screen()
+        if active_screen and hasattr(active_screen, 'update'):
+            active_screen.update()
+
+    def draw(self):
+        """Draws the UI. The main loop is responsible for refresh()."""
+        # The active screen handles clearing its own area
+        active_screen = self.get_active_screen()
+        if active_screen:
+            active_screen.draw()
+
+        if self.snackbar and self.snackbar.visible:
+            self.snackbar.draw(self.stdscr)
+
+    def show_snackbar(self, message: str, style: str = "secondary", duration: int = 3):
+        """Displays a global snackbar message."""
+        from ..ui.material_components import MaterialSnackbar # Local import
+        style_map = {"error": self.theme.ERROR, "warning": self.theme.WARNING, "success": self.theme.SUCCESS}
+        style_id = style_map.get(style, self.theme.SECONDARY)
+        self.snackbar = MaterialSnackbar(self.theme, message, duration, style_id)
+        self.snackbar.show()
+
+    def show_confirm_dialog(self, message: str, on_confirm: Callable, on_cancel: Optional[Callable] = None):
+        """Shows a confirmation dialog by pushing it onto the dialog stack."""
+        dialog_data = {"message": message, "on_confirm": on_confirm, "on_cancel": on_cancel}
+        dialog = ConfirmDialogScreen(self.stdscr, self.theme, self.layout, self.input_handler, self, self.core_modules, dialog_data)
+        dialog.on_create()
+        self.dialog_stack.append(dialog)
+        self.input_handler.set_context(dialog.name)
+
     def close_dialog(self):
-        """Close current dialog"""
-        if len(self.screen_stack) == 0:
-            return
-            
-        # Restore previous screen
-        prev_state = self.screen_stack.pop()
-        self.load_screen(prev_state.screen_name, prev_state.data)
-        self.layout.hide_modal()
+        """Closes the topmost dialog."""
+        if self.dialog_stack:
+            self.dialog_stack.pop()
+            active_screen = self.get_active_screen()
+            if active_screen:
+                self.input_handler.set_context(active_screen.name)
+
+# --- Self-Contained Dialog Screen ---
+# NOTE: In a larger project, this would be moved to its own file (e.g., screens/dialogs.py)
+class ConfirmDialogScreen(BaseScreen):
+    """A simple modal dialog for Yes/No confirmations."""
+    def on_create(self, data=None):
+        self.name = "confirm_dialog"
+        self.message = data.get("message", "Are you sure?")
+        self.on_confirm = data.get("on_confirm", lambda: None)
+        self.on_cancel = data.get("on_cancel", lambda: None)
+        super().on_create(data)
+
+    def setup_components(self):
+        h, w = self.stdscr.getmaxyx()
+        dialog_h, dialog_w = 7, max(40, len(self.message) + 4)
+        dialog_y, dialog_x = (h - dialog_h) // 2, (w - dialog_w) // 2
         
-    def preload_screen(self, screen_name: str):
-        """Preload a screen in background"""
-        if screen_name not in self.screen_cache and screen_name in self.screen_classes:
-            screen_class = self.screen_classes[screen_name]
-            screen = screen_class(
-                self.stdscr,
-                self.theme,
-                self.layout,
-                self.input_handler,
-                self
-            )
-            screen.name = screen_name
-            self.screen_cache[screen_name] = screen
-            
-    def get_screen_instance(self, screen_name: str) -> Optional[Any]:
-        """Get screen instance by name"""
-        return self.screen_cache.get(screen_name)
+        region = self.layout.regions['modal'] = type("Region", (), {'y': dialog_y, 'x': dialog_x, 'height': dialog_h, 'width': dialog_w})()
         
-    def reset_navigation(self):
-        """Reset navigation stack and cache"""
-        self.screen_stack.clear()
-        self.clear_cache()
+        self.dialog_card = MaterialCard(self.theme, region, "Confirmation")
+        self.confirm_btn = MaterialButton(self.theme, type("Region", (), {'y': region.y + 4, 'x': region.x + 5, 'height': 1, 'width': 8})(), "Confirm", self.confirm_action)
+        self.cancel_btn = MaterialButton(self.theme, type("Region", (), {'y': region.y + 4, 'x': region.x + dialog_w - 13, 'height': 1, 'width': 8})(), "Cancel", self.cancel_action)
         
-    def save_navigation_state(self):
-        """Save entire navigation state"""
-        state = {
-            "stack": [(s.screen_name, s.data) for s in self.screen_stack],
-            "current": self.current_screen.name if self.current_screen else "",
-            "current_data": self.current_screen.get_state() if self.current_screen else None
-        }
+        self.add_component(self.dialog_card)
+        self.add_component(self.confirm_btn)
+        self.add_component(self.cancel_btn)
+
+    def handle_input(self, key):
+        if key == curses.KEY_LEFT or key == curses.KEY_RIGHT or key == 9: # Tab
+            self.confirm_btn.focused, self.cancel_btn.focused = self.cancel_btn.focused, self.confirm_btn.focused
+        elif self.confirm_btn.focused:
+            self.confirm_btn.handle_input(key)
+        elif self.cancel_btn.focused:
+            self.cancel_btn.handle_input(key)
+
+    def confirm_action(self):
+        self.screen_manager.close_dialog()
+        self.on_confirm()
+
+    def cancel_action(self):
+        self.screen_manager.close_dialog()
+        if self.on_cancel: self.on_cancel()
+
+    def draw(self):
+        # Dim the background screen (optional, creates a modal effect)
+        if self.screen_manager.current_screen:
+            # This is a simple way to dim; a more advanced way would use color pairs
+            self.stdscr.attron(curses.A_DIM)
+            self.screen_manager.current_screen.draw()
+            self.stdscr.attroff(curses.A_DIM)
         
-        try:
-            with open(self.state_dir / "navigation_state.pkl", 'wb') as f:
-                pickle.dump(state, f)
-        except OSError:
-            pass
-            
-    def load_navigation_state(self) -> bool:
-        """Load navigation state from disk"""
-        state_path = self.state_dir / "navigation_state.pkl"
-        if not state_path.exists():
-            return False
-            
-        try:
-            with open(state_path, 'rb') as f:
-                state = pickle.load(f)
-                
-            # Restore stack
-            self.screen_stack = [ScreenState(name, data) for name, data in state["stack"]]
-            
-            # Restore current screen
-            if state["current"]:
-                self.load_screen(state["current"], state["current_data"])
-                
-            return True
-        except (OSError, pickle.UnpicklingError):
-            return False
+        # Draw the dialog on top
+        self.dialog_card.draw(self.stdscr)
+        self.stdscr.addstr(self.dialog_card.region.y + 2, self.dialog_card.region.x + 2, self.message)
+        self.confirm_btn.draw(self.stdscr)
+        self.cancel_btn.draw(self.stdscr)
