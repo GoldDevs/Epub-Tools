@@ -48,4 +48,4 @@ The application will launch, and all user data (history, logs, backups) will be 
 
 ### Source Code & Issues
 
-The full source code, issue tracker, and contribution guidelines are available on our [GitHub Repository](https://github.com/your-username/epub-editor-pro).
+The full source code, issue tracker, and contribution guidelines are available on our [GitHub Repository](https://github.com/GoldDevs/Epub-Tools).
