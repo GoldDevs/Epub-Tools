@@ -1,0 +1,27 @@
+# Python
+__pycache__/
+*.py[cod]
+*.class
+
+# Build artifacts
+build/
+dist/
+*.egg-info/
+*.egg
+
+# Virtual environment
+.venv/
+venv/
+env/
+
+# User data (created by the app)
+.config/
+*.log
+backups/
+history/
+state_cache/
+templates/
+
+# IDE files
+.vscode/
+.idea/

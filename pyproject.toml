@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mobile-epubedit"
+version = "0.4.0"
+authors = [
+  { name="D.G.I.", email="opensc306@gmail.com" },
+]
+description = "Feature-rich modular EPUB editor optimized for Android Termux with intuitive TUI"
+readme = "README.md"
+requires-python = ">=3.8"
+license = { file="LICENSE" }
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Environment :: Console :: Curses",
+    "Topic :: Text Editors",
+    "Development Status :: 4 - Beta",
+]
+
+# 'curses' is part of the standard library, so it doesn't need to be listed.
+dependencies = []
+
+[project.scripts]
+# This creates the command-line tool 'epubedit'
+epubedit = "epub_editor_pro.app:start"
